@@ -1,11 +1,14 @@
 import asyncio
 import os
 os.environ["ENV"] = "dev"
-# Here, one can setup any model they wish. OpenAI and Phi4 were used in testing.
-# os.environ["LLM_PROVIDER"] = "ollama"
-# os.environ["LLM_MODEL"] = "phi4:latest"
-# os.environ["LLM_ENDPOINT"] = "http://localhost:11434/v1"
+# Note: Environment variables must be set BEFORE importing cognee
+# Since we are using Ollama locally, we do not need an API key, although it is important that it is defined, and not an empty string.
 os.environ["LLM_API_KEY"] = "."
+os.environ["LLM_PROVIDER"] = "ollama"
+os.environ["LLM_MODEL"] = "cognee-distillabs-model-gguf-quantized"
+os.environ["LLM_ENDPOINT"] = "http://localhost:11434/v1"
+os.environ["LLM_MAX_TOKENS"] = "16384"
+
 os.environ["EMBEDDING_PROVIDER"] = "ollama"
 os.environ["EMBEDDING_MODEL"] = "nomic-embed-text:latest"
 os.environ["EMBEDDING_ENDPOINT"] = "http://localhost:11434/api/embed"

@@ -89,6 +89,7 @@ export function PDFUpload({ onUploadComplete }: PDFUploadProps) {
       formData.append("data_type", dataType)
 
       // Use appropriate endpoint based on file type
+      // Note: /api is already included because the app is mounted at /api
       const endpoint = fileType === "pdf" 
         ? "http://localhost:8000/api/v1/ingest/pdf"
         : "http://localhost:8000/api/v1/ingest/image"

@@ -25,12 +25,14 @@ export function ChatSidebar() {
     }
   ])
   const [loading, setLoading] = useState(false)
+  const [sessionId] = useState(() => `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const suggestedPrompts = [
-    "How many invoices do we have in total?",
-    "Are there any payment discrepancies?",
-    "Which vendors have the most invoices?"
+    "Vendor 2 says they received a wrong payment, can you check whether all payments to Vendor 2 are correct?",
+    "We ordered a new laptop from Vendor 3 but it was not delivered, can you check whether we ever paid for a laptop from Vendor 3?",
+    "We are auditing our hardware budget. Have we paid for any storage devices or hard drives recently?",
+    "Which vendors consistently give us discounts on our orders?"
   ]
 
   const scrollToBottom = () => {
@@ -63,20 +65,29 @@ export function ChatSidebar() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            query: userMessage
+            query: userMessage,
+            session_id: sessionId
           })
         })
 
         if (!response.ok) {
-          throw new Error(`API error: ${response.status}`)
+          const errorData = await response.json().catch(() => ({ detail: response.statusText }))
+          throw new Error(errorData.detail || `API error: ${response.status}`)
         }
 
         const data = await response.json()
         
         // Add assistant response
+        // The API returns { answer: string, session_id?: string }
+        const answer = data.answer || data.response || data.message || "I received your question but couldn't generate a response."
+        
+        if (!answer || answer.trim() === "") {
+          throw new Error("Empty response from API")
+        }
+        
         const assistantMessage: Message = {
           role: "assistant",
-          content: data.answer || data.response || "I received your question but couldn't generate a response.",
+          content: answer,
           timestamp: new Date()
         }
         setMessages(prev => [...prev, assistantMessage])
@@ -162,7 +173,7 @@ export function ChatSidebar() {
                       ? "rounded-tl-sm bg-muted/60" 
                       : "rounded-tr-sm bg-primary/10"
                   )}>
-                    <p className="text-sm leading-relaxed text-foreground whitespace-pre-line">
+                    <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap break-words">
                       {msg.content}
                     </p>
                   </div>

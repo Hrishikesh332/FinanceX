@@ -107,7 +107,7 @@ _retriever: Optional[GraphCompletionRetrieverWithUserPrompt] = None
 def get_retriever(
     user_prompt_filename: Optional[str] = None,
     system_prompt_path: Optional[str] = None,
-    top_k: int = 10
+    top_k: int = 5  # Reduced from 10 to 5 for faster responses
 ) -> GraphCompletionRetrieverWithUserPrompt:
     """
     Get or create the retriever instance.
@@ -130,7 +130,7 @@ def get_retriever(
         _retriever = GraphCompletionRetrieverWithUserPrompt(
             user_prompt_filename=user_prompt_filename or USER_PROMPT_FILENAME,
             system_prompt_path=system_prompt_path or SYSTEM_PROMPT_PATH,
-            top_k=top_k,
+            top_k=top_k,  # Default is now 5 for faster responses
         )
     return _retriever
 
@@ -169,11 +169,11 @@ async def root():
         "message": "FinanceX Cognee API",
         "version": "1.0.0",
         "endpoints": {
-            "ingest_text": "/api/v1/ingest/text",
-            "ingest_csv": "/api/v1/ingest/csv",
-            "ingest_pdf": "/api/v1/ingest/pdf",
-            "ingest_image": "/api/v1/ingest/image",
-            "chat": "/api/v1/chat",
+            "ingest_text": "/v1/ingest/text",
+            "ingest_csv": "/v1/ingest/csv",
+            "ingest_pdf": "/v1/ingest/pdf",
+            "ingest_image": "/v1/ingest/image",
+            "chat": "/v1/chat",
             "health": "/health"
         }
     }
@@ -185,7 +185,7 @@ async def health():
     return {"status": "healthy", "service": "FinanceX Cognee API"}
 
 
-@app.post("/api/v1/ingest/text", response_model=IngestionResponse)
+@app.post("/v1/ingest/text", response_model=IngestionResponse)
 async def ingest_text(request: TextIngestionRequest):
     """
     Ingest text data into the knowledge graph.
@@ -231,7 +231,7 @@ async def ingest_text(request: TextIngestionRequest):
         raise HTTPException(status_code=500, detail=f"Error during ingestion: {str(e)}")
 
 
-@app.post("/api/v1/ingest/csv", response_model=IngestionResponse)
+@app.post("/v1/ingest/csv", response_model=IngestionResponse)
 async def ingest_csv(
     file: UploadFile = File(...),
     data_type: str = Form("invoice"),
@@ -297,7 +297,7 @@ async def ingest_csv(
         raise HTTPException(status_code=500, detail=f"Error during CSV ingestion: {str(e)}")
 
 
-@app.post("/api/v1/ingest/pdf", response_model=IngestionResponse)
+@app.post("/v1/ingest/pdf", response_model=IngestionResponse)
 async def ingest_pdf(
     file: UploadFile = File(...),
     data_type: str = Form("invoice"),
@@ -501,7 +501,7 @@ async def ingest_pdf(
         raise HTTPException(status_code=500, detail=f"Error during PDF ingestion: {str(e)}")
 
 
-@app.post("/api/v1/ingest/image", response_model=IngestionResponse)
+@app.post("/v1/ingest/image", response_model=IngestionResponse)
 async def ingest_image(
     file: UploadFile = File(...),
     data_type: str = Form("invoice"),
@@ -592,9 +592,102 @@ async def ingest_image(
             # Extract text from OCR response
             extracted_text = ""
             
+            # Debug: Log response structure to understand format
+            import json
+            try:
+                # Try to convert response to dict for inspection
+                if hasattr(ocr_response, '__dict__'):
+                    response_dict = ocr_response.__dict__
+                elif isinstance(ocr_response, dict):
+                    response_dict = ocr_response
+                else:
+                    response_dict = {"raw": str(ocr_response)[:200]}  # Limit length
+                
+                # Log the response structure (for debugging)
+                print(f"OCR Response type: {type(ocr_response).__name__}")
+                if isinstance(response_dict, dict):
+                    print(f"OCR Response keys: {list(response_dict.keys())}")
+                    # Try to pretty print if it's JSON-like
+                    try:
+                        print(f"OCR Response preview: {json.dumps(response_dict, indent=2, default=str)[:500]}")
+                    except:
+                        pass
+            except Exception as e:
+                print(f"Error inspecting OCR response: {e}")
+            
             # Try different possible response structures
-            if hasattr(ocr_response, 'text'):
+            # Method 1: Pages field (Mistral OCR response structure)
+            if hasattr(ocr_response, 'pages') and ocr_response.pages:
+                pages = ocr_response.pages
+                text_parts = []
+                if isinstance(pages, list):
+                    print(f"Processing {len(pages)} page(s) from OCR response")
+                    for i, page in enumerate(pages):
+                        # Check for markdown or text in each page
+                        # Pages can be objects with markdown attribute
+                        page_text = None
+                        if hasattr(page, 'markdown'):
+                            page_text = page.markdown
+                            print(f"Page {i}: Extracted markdown (length: {len(page_text) if page_text else 0})")
+                        elif hasattr(page, 'text'):
+                            page_text = page.text
+                            print(f"Page {i}: Extracted text (length: {len(page_text) if page_text else 0})")
+                        elif hasattr(page, 'content'):
+                            content = page.content
+                            if isinstance(content, str):
+                                page_text = content
+                            elif hasattr(content, 'markdown'):
+                                page_text = content.markdown
+                            elif hasattr(content, 'text'):
+                                page_text = content.text
+                            if page_text:
+                                print(f"Page {i}: Extracted from content (length: {len(page_text)})")
+                        elif isinstance(page, dict):
+                            # Try common keys in page dict
+                            for key in ['markdown', 'text', 'content']:
+                                if key in page and page[key]:
+                                    page_text = str(page[key])
+                                    print(f"Page {i}: Extracted from dict key '{key}' (length: {len(page_text)})")
+                                    break
+                        elif isinstance(page, str):
+                            page_text = page
+                            print(f"Page {i}: Extracted string (length: {len(page_text)})")
+                        
+                        if page_text:
+                            text_parts.append(page_text)
+                        else:
+                            print(f"Page {i}: No text found. Page type: {type(page).__name__}, attributes: {dir(page) if hasattr(page, '__dict__') else 'N/A'}")
+                elif hasattr(pages, 'markdown'):
+                    text_parts.append(pages.markdown)
+                elif hasattr(pages, 'text'):
+                    text_parts.append(pages.text)
+                elif isinstance(pages, str):
+                    text_parts.append(pages)
+                
+                if text_parts:
+                    # Join pages with double newline for better separation
+                    extracted_text = '\n\n'.join(text_parts)
+                    print(f"Extracted {len(text_parts)} page(s) of text, total length: {len(extracted_text)}")
+            
+            # Method 2: Document annotation field
+            elif hasattr(ocr_response, 'document_annotation') and ocr_response.document_annotation:
+                doc_ann = ocr_response.document_annotation
+                if hasattr(doc_ann, 'markdown'):
+                    extracted_text = doc_ann.markdown
+                elif hasattr(doc_ann, 'text'):
+                    extracted_text = doc_ann.text
+                elif hasattr(doc_ann, 'content'):
+                    extracted_text = doc_ann.content if isinstance(doc_ann.content, str) else str(doc_ann.content)
+                elif isinstance(doc_ann, str):
+                    extracted_text = doc_ann
+            
+            # Method 3: Direct text attribute
+            elif hasattr(ocr_response, 'text'):
                 extracted_text = ocr_response.text
+            # Method 4: Markdown field (common in OCR responses)
+            elif hasattr(ocr_response, 'markdown'):
+                extracted_text = ocr_response.markdown
+            # Method 5: Content field
             elif hasattr(ocr_response, 'content'):
                 content = ocr_response.content
                 if isinstance(content, str):
@@ -607,30 +700,116 @@ async def ingest_image(
                             text_parts.append(item)
                         elif hasattr(item, 'text'):
                             text_parts.append(item.text)
-                        elif isinstance(item, dict) and 'text' in item:
-                            text_parts.append(item['text'])
+                        elif hasattr(item, 'markdown'):
+                            text_parts.append(item.markdown)
+                        elif isinstance(item, dict):
+                            # Try multiple keys in dict
+                            for key in ['text', 'markdown', 'content', 'value']:
+                                if key in item and item[key]:
+                                    text_parts.append(str(item[key]))
+                                    break
                     extracted_text = '\n'.join(text_parts)
+            # Method 4: Result field
             elif hasattr(ocr_response, 'result'):
                 result = ocr_response.result
                 if isinstance(result, str):
                     extracted_text = result
                 elif hasattr(result, 'text'):
                     extracted_text = result.text
+                elif hasattr(result, 'markdown'):
+                    extracted_text = result.markdown
+            # Method 5: Direct string
             elif isinstance(ocr_response, str):
                 extracted_text = ocr_response
+            # Method 6: Dictionary response
             elif isinstance(ocr_response, dict):
-                # Try common keys
-                for key in ['text', 'content', 'result', 'extracted_text', 'ocr_text']:
+                # Try common keys including markdown
+                for key in ['text', 'markdown', 'content', 'result', 'extracted_text', 'ocr_text', 'data']:
                     if key in ocr_response:
                         value = ocr_response[key]
                         if value:
-                            extracted_text = value if isinstance(value, str) else str(value)
-                            break
+                            if isinstance(value, str):
+                                extracted_text = value
+                            elif isinstance(value, dict):
+                                # Nested dict - try to find text/markdown
+                                for nested_key in ['text', 'markdown', 'content']:
+                                    if nested_key in value:
+                                        extracted_text = str(value[nested_key])
+                                        break
+                            else:
+                                extracted_text = str(value)
+                            if extracted_text:
+                                break
+            # Method 7: Check for choices/items (some APIs return arrays)
+            elif hasattr(ocr_response, 'choices'):
+                choices = ocr_response.choices
+                if isinstance(choices, list) and len(choices) > 0:
+                    first_choice = choices[0]
+                    if hasattr(first_choice, 'text'):
+                        extracted_text = first_choice.text
+                    elif hasattr(first_choice, 'markdown'):
+                        extracted_text = first_choice.markdown
+                    elif hasattr(first_choice, 'message'):
+                        message = first_choice.message
+                        if hasattr(message, 'content'):
+                            extracted_text = message.content
+                        elif hasattr(message, 'text'):
+                            extracted_text = message.text
+            
+            # If still no text, try to get string representation
+            if not extracted_text or not extracted_text.strip():
+                # Last resort: try to extract any text-like content
+                response_str = str(ocr_response)
+                # Check if response string contains actual text (not just object representation)
+                if len(response_str) > 100 and not response_str.startswith('<'):
+                    # Might be JSON or text content
+                    try:
+                        import json
+                        parsed = json.loads(response_str)
+                        # Recursively search for text fields
+                        def find_text(obj, depth=0):
+                            if depth > 5:  # Prevent infinite recursion
+                                return None
+                            if isinstance(obj, str) and len(obj) > 10:
+                                return obj
+                            elif isinstance(obj, dict):
+                                for key in ['text', 'markdown', 'content', 'result']:
+                                    if key in obj:
+                                        result = find_text(obj[key], depth+1)
+                                        if result:
+                                            return result
+                                for value in obj.values():
+                                    result = find_text(value, depth+1)
+                                    if result:
+                                        return result
+                            elif isinstance(obj, list):
+                                for item in obj:
+                                    result = find_text(item, depth+1)
+                                    if result:
+                                        return result
+                            return None
+                        found_text = find_text(parsed)
+                        if found_text:
+                            extracted_text = found_text
+                    except:
+                        pass
             
             if not extracted_text or not extracted_text.strip():
+                # Provide more detailed error with response info
+                error_detail = "No text could be extracted from the image. "
+                try:
+                    response_type = type(ocr_response).__name__
+                    if hasattr(ocr_response, '__dict__'):
+                        keys = list(ocr_response.__dict__.keys())
+                        error_detail += f"Response type: {response_type}, Available attributes: {keys}"
+                    else:
+                        error_detail += f"Response type: {response_type}"
+                except:
+                    error_detail += "Could not inspect response structure."
+                
                 raise HTTPException(
                     status_code=400,
-                    detail="No text could be extracted from the image. The image might not contain readable text."
+                    detail=error_detail
                 )
             
             # Determine which prompt to use
@@ -684,7 +863,7 @@ async def ingest_image(
         raise HTTPException(status_code=500, detail=f"Error during image ingestion: {str(e)}")
 
 
-@app.post("/api/v1/chat", response_model=ChatResponse)
+@app.post("/v1/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
     Query the knowledge graph with a natural language question.
@@ -712,15 +891,25 @@ async def chat(request: ChatRequest):
         # This internally calls generate_completion_with_user_prompt from custom_generate_completion.py
         retriever = get_retriever()
         
-        # Get completion
+        # Get completion with timeout handling
         # This triggers:
         # 1. Graph search to find relevant context
         # 2. User prompt rendering with context and question
         # 3. generate_completion_with_user_prompt() which uses LLMGateway.acreate_structured_output()
-        results = await retriever.get_completion(
-            query=request.query.strip(),
-            session_id=request.session_id
-        )
+        try:
+            # Set a timeout for the completion (60 seconds)
+            results = await asyncio.wait_for(
+                retriever.get_completion(
+                    query=request.query.strip(),
+                    session_id=request.session_id
+                ),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="Request timed out. The knowledge graph query took too long. Try a simpler question or check if Ollama is running properly."
+            )
         
         if not results or len(results) == 0:
             raise HTTPException(status_code=500, detail="No response generated")
@@ -732,11 +921,13 @@ async def chat(request: ChatRequest):
             session_id=request.session_id
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during chat: {str(e)}")
 
 
-@app.get("/api/v1/stats")
+@app.get("/v1/stats")
 async def get_stats():
     """Get statistics about the knowledge graph"""
     try:

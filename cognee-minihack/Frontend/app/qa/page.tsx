@@ -7,11 +7,10 @@ import { Send, Sparkles, AlertCircle } from "lucide-react"
 import { useState } from "react"
 
 const sampleQuestions = [
-  "How many invoices do we have in total?",
-  "What is the total amount across all transactions?",
-  "Which vendors have the most invoices?",
-  "Are there any payment discrepancies?",
-  "Show me recent transactions from Vendor 2",
+  "Vendor 2 says they received a wrong payment, can you check whether all payments to Vendor 2 are correct?",
+  "We ordered a new laptop from Vendor 3 but it was not delivered, can you check whether we ever paid for a laptop from Vendor 3?",
+  "We are auditing our hardware budget. Have we paid for any storage devices or hard drives recently?",
+  "Which vendors consistently give us discounts on our orders?",
 ]
 
 export default function QAPage() {
@@ -19,6 +18,7 @@ export default function QAPage() {
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [sessionId] = useState(() => `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -38,22 +38,31 @@ export default function QAPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          query: userMessage
+          query: userMessage,
+          session_id: sessionId
         })
       })
 
       if (!response.ok) {
-        throw new Error(`API returned ${response.status}: ${response.statusText}`)
+        const errorData = await response.json().catch(() => ({ detail: response.statusText }))
+        throw new Error(errorData.detail || `API returned ${response.status}: ${response.statusText}`)
       }
 
       const data = await response.json()
       
       // Add the assistant's response
+      // The API returns { answer: string, session_id?: string }
+      const answer = data.answer || data.response || data.message || "I received your question but couldn't generate a response."
+      
+      if (!answer || answer.trim() === "") {
+        throw new Error("Empty response from API")
+      }
+      
       setMessages(prev => [
         ...prev,
         {
           role: "assistant",
-          content: data.answer || data.response || "I received your question but couldn't generate a response."
+          content: answer
         }
       ])
     } catch (err) {
@@ -128,11 +137,13 @@ export default function QAPage() {
                   )}
                   <div
                     className={`rounded-lg px-4 py-3 max-w-[80%] ${
-                      message.role === "user" ? "bg-primary text-primary-foreground" : "bg-card border border-border"
+                      message.role === "user" 
+                        ? "bg-primary text-primary-foreground" 
+                        : "bg-card border border-border text-foreground"
                     }`}
                   >
                     <p
-                      className={`text-sm whitespace-pre-line ${
+                      className={`text-sm whitespace-pre-wrap break-words leading-relaxed ${
                         message.role === "user" ? "text-primary-foreground" : "text-foreground"
                       }`}
                     >
