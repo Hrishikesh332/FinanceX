@@ -71,3 +71,15 @@ Thumbs.db
 
 # HTML
 *.html
+
+# Node.js dependencies
+node_modules/
+**/node_modules/
+
+# Next.js build output
+.next/
+**/.next/
+out/
+
+# Next.js cache
+.turbo/
