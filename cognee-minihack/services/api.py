@@ -24,8 +24,12 @@ Key Components:
 """
 
 import os
-import warnings
 import sys
+import warnings
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Suppress transformers warnings about missing PyTorch/TensorFlow (not needed when using Ollama)
 # These warnings are harmless since we're using Ollama for embeddings and LLM
@@ -49,7 +53,6 @@ os.environ["EMBEDDING_DIMENSIONS"] = "768"
 os.environ["HUGGINGFACE_TOKENIZER"] = "nomic-ai/nomic-embed-text-v1.5"
 
 import asyncio
-from pathlib import Path
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
@@ -67,7 +70,8 @@ app = FastAPI(
 
 def load_prompt(filename: str) -> str:
     """Load a prompt from the prompts directory"""
-    prompt_path = Path(__file__).parent / "prompts" / filename
+    # Prompts are in the parent directory (cognee-minihack/prompts/)
+    prompt_path = Path(__file__).parent.parent / "prompts" / filename
     if not prompt_path.exists():
         raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
     with open(prompt_path, 'r') as f:
@@ -79,7 +83,7 @@ INVOICE_PROMPT = load_prompt("invoice_prompt.txt")
 TRANSACTION_PROMPT = load_prompt("transaction_prompt.txt")
 
 # Prompt paths for chat/retrieval (used with custom_retriever and custom_generate_completion)
-SYSTEM_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "system_prompt.txt")
+SYSTEM_PROMPT_PATH = str(Path(__file__).parent.parent / "prompts" / "system_prompt.txt")
 USER_PROMPT_FILENAME = "user_prompt.txt"
 
 # Initialize retriever (lazy initialization)
