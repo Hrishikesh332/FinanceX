@@ -24,6 +24,16 @@ Key Components:
 """
 
 import os
+import warnings
+import sys
+
+# Suppress transformers warnings about missing PyTorch/TensorFlow (not needed when using Ollama)
+# These warnings are harmless since we're using Ollama for embeddings and LLM
+warnings.filterwarnings("ignore", message=".*PyTorch.*TensorFlow.*Flax.*")
+warnings.filterwarnings("ignore", message=".*Models won't be available.*")
+# Also suppress the specific transformers warning
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
 # Note: Environment variables must be set BEFORE importing cognee
 # Since we are using Ollama locally, we do not need an API key, although it is important that it is defined, and not an empty string.
 os.environ["LLM_API_KEY"] = "."
