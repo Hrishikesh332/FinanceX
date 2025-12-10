@@ -13,7 +13,7 @@ os.environ["EMBEDDING_ENDPOINT"] = "http://localhost:11434/api/embed"
 os.environ["EMBEDDING_DIMENSIONS"] = "768"
 os.environ["HUGGINGFACE_TOKENIZER"] = "nomic-ai/nomic-embed-text-v1.5"
 
-from custom_retriever import GraphCompletionRetrieverWithUserPrompt
+from custom_retriever import GraphCompletionRetrieverWithUserPrompt, CompletionResult
 import asyncio
 import pathlib
 
@@ -61,15 +61,45 @@ async def main():
         top_k=10,
     )
 
-    user_answers = []
+    # Use get_completion_with_sources to get both the answer and source information
+    results: list[CompletionResult] = []
     for question in user_questions:
-        completion = await retriever.get_completion(query=question)
-        user_answers.append(completion)
+        result = await retriever.get_completion_with_sources(query=question)
+        results.append(result)
 
-    for i in range(len(user_questions)):
-        print(f"Question: {user_questions[i]}")
-        print(f"Answer: {user_answers[i][0]}")
-        print("-" * 50)
+    # Ensure graphs directory exists
+    graphs_dir = pathlib.Path(__file__).parent / "graphs"
+    graphs_dir.mkdir(exist_ok=True)
+
+    for i, question in enumerate(user_questions):
+        result = results[i]
+        print(f"\n{'='*60}")
+        print(f"QUESTION: {question}")
+        print(f"{'='*60}")
+        print(f"\nANSWER: {result.answer}")
+        print(f"\n{'-'*40}")
+        print("SOURCES USED (Knowledge Graph Triplets):")
+        print(f"{'-'*40}")
+        print(result.get_sources_summary())
+        
+        # Generate visualization for this question's sources
+        safe_filename = f"query_{i+1}_sources.html"
+        graph_path = graphs_dir / safe_filename
+        short_question = question[:50] + "..." if len(question) > 50 else question
+        result.visualize_sources(
+            output_path=str(graph_path),
+            title=f"Q{i+1}: {short_question}"
+        )
+        print(f"\n{'-'*40}")
+        print(f"GRAPH VISUALIZATION: {graph_path}")
+        print(f"{'-'*40}")
+        
+        # Show truncated context if it's too long
+        print("\nRAW CONTEXT PROVIDED TO LLM:")
+        print(f"{'-'*40}")
+        context_preview = result.context_text[:1500] + "..." if len(result.context_text) > 1500 else result.context_text
+        print(context_preview)
+        print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":

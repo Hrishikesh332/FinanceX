@@ -3,15 +3,120 @@
 import type React from "react"
 
 import { useState, useRef, useEffect } from "react"
-import { MessageSquare, X, Send, Sparkles, Bot, User } from "lucide-react"
+import { MessageSquare, X, Send, Sparkles, Bot, User, Network, ExternalLink, ChevronDown, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+
+interface Source {
+  source: string
+  relationship: string
+  target: string
+}
 
 interface Message {
   role: "user" | "assistant"
   content: string
   timestamp: Date
+  sources?: Source[]
+  graphUrl?: string
+}
+
+function CompactSourcesViewer({ sources, graphUrl }: { sources: Source[], graphUrl?: string }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const [showGraph, setShowGraph] = useState(false)
+
+  if (!sources || sources.length === 0) return null
+
+  const displayedSources = isExpanded ? sources : sources.slice(0, 2)
+
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="rounded-md border border-border/50 bg-background/30 p-2">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[10px] font-medium text-muted-foreground flex items-center gap-1">
+            <Network className="h-2.5 w-2.5" />
+            Sources ({sources.length})
+          </span>
+          {graphUrl && (
+            <button
+              className="text-[10px] text-primary hover:underline flex items-center gap-0.5"
+              onClick={() => setShowGraph(true)}
+            >
+              <ExternalLink className="h-2.5 w-2.5" />
+              Graph
+            </button>
+          )}
+        </div>
+        
+        <div className="space-y-1">
+          {displayedSources.map((source, index) => (
+            <div
+              key={index}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground bg-muted/30 rounded px-1.5 py-1"
+            >
+              <span className="font-medium text-foreground truncate max-w-[70px]" title={source.source}>
+                {source.source || "?"}
+              </span>
+              <span className="text-primary font-mono text-[9px]">
+                {source.relationship}
+              </span>
+              <span>→</span>
+              <span className="font-medium text-foreground truncate max-w-[70px]" title={source.target}>
+                {source.target || "?"}
+              </span>
+            </div>
+          ))}
+        </div>
+        
+        {sources.length > 2 && (
+          <button
+            className="w-full mt-1 text-[10px] text-muted-foreground hover:text-foreground flex items-center justify-center gap-0.5"
+            onClick={() => setIsExpanded(!isExpanded)}
+          >
+            {isExpanded ? (
+              <>
+                <ChevronUp className="h-2.5 w-2.5" />
+                Less
+              </>
+            ) : (
+              <>
+                <ChevronDown className="h-2.5 w-2.5" />
+                +{sources.length - 2} more
+              </>
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Graph Modal */}
+      {showGraph && graphUrl && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-background/80 backdrop-blur-sm">
+          <div className="relative w-[90vw] h-[85vh] bg-card rounded-lg border border-border shadow-2xl overflow-hidden">
+            <div className="absolute top-0 left-0 right-0 flex items-center justify-between p-4 bg-card/90 backdrop-blur border-b border-border z-10">
+              <h3 className="font-semibold text-foreground flex items-center gap-2">
+                <Network className="h-5 w-5 text-primary" />
+                Knowledge Graph Visualization
+              </h3>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setShowGraph(false)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <iframe
+              src={`http://localhost:8000${graphUrl}`}
+              className="w-full h-full pt-14"
+              title="Knowledge Graph Visualization"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function ChatSidebar() {
@@ -25,6 +130,7 @@ export function ChatSidebar() {
     }
   ])
   const [loading, setLoading] = useState(false)
+  const [showSources, setShowSources] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const suggestedPrompts = [
@@ -56,8 +162,8 @@ export function ChatSidebar() {
       setLoading(true)
 
       try {
-        // Call the real API
-        const response = await fetch('http://localhost:8000/api/v1/chat', {
+        // Call the API with sources
+        const response = await fetch('http://localhost:8000/api/v1/chat/with-sources', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -73,18 +179,20 @@ export function ChatSidebar() {
 
         const data = await response.json()
         
-        // Add assistant response
+        // Add assistant response with sources
         const assistantMessage: Message = {
           role: "assistant",
           content: data.answer || data.response || "I received your question but couldn't generate a response.",
-          timestamp: new Date()
+          timestamp: new Date(),
+          sources: data.sources || [],
+          graphUrl: data.graph_url
         }
         setMessages(prev => [...prev, assistantMessage])
       } catch (error) {
         console.error('Error calling chat API:', error)
         const errorMessage: Message = {
           role: "assistant",
-          content: "Sorry, I'm having trouble connecting to the knowledge graph. Please make sure the API is running with: `python app.py`",
+          content: "Sorry, I'm having trouble connecting to the knowledge graph. Please make sure the API is running with: `python services/api.py`",
           timestamp: new Date()
         }
         setMessages(prev => [...prev, errorMessage])
@@ -133,6 +241,15 @@ export function ChatSidebar() {
               <MessageSquare className="h-5 w-5 text-primary" />
               <h2 className="text-lg font-semibold text-foreground">Finance Assistant</h2>
             </div>
+            <Button
+              variant={showSources ? "default" : "ghost"}
+              size="sm"
+              className="h-7 text-xs px-2"
+              onClick={() => setShowSources(!showSources)}
+            >
+              <Network className="h-3 w-3 mr-1" />
+              {showSources ? "On" : "Off"}
+            </Button>
           </div>
 
           {/* Chat Messages */}
@@ -165,6 +282,11 @@ export function ChatSidebar() {
                     <p className="text-sm leading-relaxed text-foreground whitespace-pre-line">
                       {msg.content}
                     </p>
+                    
+                    {/* Show sources for assistant messages */}
+                    {msg.role === "assistant" && showSources && msg.sources && msg.sources.length > 0 && (
+                      <CompactSourcesViewer sources={msg.sources} graphUrl={msg.graphUrl} />
+                    )}
                   </div>
                 </div>
               </div>

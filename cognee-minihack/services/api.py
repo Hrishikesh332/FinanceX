@@ -57,11 +57,13 @@ import tempfile
 import base64
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import cognee
-from custom_retriever import GraphCompletionRetrieverWithUserPrompt
+from custom_retriever import GraphCompletionRetrieverWithUserPrompt, CompletionResult
+from cognee.api.v1.visualize.visualize import cognee_network_visualization
 
 # Import Mistral for OCR
 try:
@@ -75,6 +77,15 @@ app = FastAPI(
     title="FinanceX Cognee API",
     description="API for ingesting financial data and querying the knowledge graph",
     version="1.0.0"
+)
+
+# Add CORS middleware for Frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -153,6 +164,15 @@ class ChatResponse(BaseModel):
     """Response model for chat queries"""
     answer: str
     session_id: Optional[str] = None
+    sources: Optional[List[Dict[str, str]]] = None
+
+
+class ChatWithSourcesResponse(BaseModel):
+    """Response model for chat queries with source information"""
+    answer: str
+    session_id: Optional[str] = None
+    sources: List[Dict[str, str]]
+    graph_url: str
 
 
 class IngestionResponse(BaseModel):
@@ -174,6 +194,9 @@ async def root():
             "ingest_pdf": "/api/v1/ingest/pdf",
             "ingest_image": "/api/v1/ingest/image",
             "chat": "/api/v1/chat",
+            "chat_with_sources": "/api/v1/chat/with-sources",
+            "visualize_query": "/api/v1/visualize-query",
+            "get_graph": "/api/v1/graphs/{filename}",
             "health": "/health"
         }
     }
@@ -748,6 +771,230 @@ async def get_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting stats: {str(e)}")
+
+
+def triplets_to_graph_data(triplets) -> tuple:
+    """
+    Convert triplets/edges from a query result into graph data format 
+    compatible with cognee_network_visualization.
+    
+    Returns:
+        tuple: (nodes_data, edges_data) where:
+            - nodes_data: list of (node_id, node_info) tuples
+            - edges_data: list of (source, target, relation, edge_info) tuples
+    """
+    nodes_dict = {}  # Use dict to avoid duplicates
+    edges_data = []
+    
+    for edge in triplets:
+        try:
+            source_node = edge.get_source_node() if hasattr(edge, 'get_source_node') else None
+            target_node = edge.get_destination_node() if hasattr(edge, 'get_destination_node') else None
+        except Exception:
+            continue
+        
+        if source_node is None or target_node is None:
+            continue
+        
+        # Extract source node info
+        source_id = source_node.id if hasattr(source_node, 'id') else str(source_node)
+        source_attrs = source_node.attributes if hasattr(source_node, 'attributes') else {}
+        source_info = {
+            "name": source_attrs.get('name', str(source_id)[:30]),
+            "type": source_attrs.get('type', 'Entity'),
+            "description": source_attrs.get('description', source_attrs.get('content', '')),
+        }
+        nodes_dict[source_id] = source_info
+        
+        # Extract target node info
+        target_id = target_node.id if hasattr(target_node, 'id') else str(target_node)
+        target_attrs = target_node.attributes if hasattr(target_node, 'attributes') else {}
+        target_info = {
+            "name": target_attrs.get('name', str(target_id)[:30]),
+            "type": target_attrs.get('type', 'Entity'),
+            "description": target_attrs.get('description', target_attrs.get('content', '')),
+        }
+        nodes_dict[target_id] = target_info
+        
+        # Extract edge info
+        edge_attrs = edge.attributes if hasattr(edge, 'attributes') else {}
+        relationship = edge_attrs.get('relationship_type', edge_attrs.get('relationship_name', 'related_to'))
+        
+        edges_data.append((
+            source_id,
+            target_id,
+            relationship,
+            edge_attrs
+        ))
+    
+    # Convert nodes dict to list of tuples
+    nodes_data = [(node_id, node_info) for node_id, node_info in nodes_dict.items()]
+    
+    return (nodes_data, edges_data)
+
+
+def extract_sources_list(triplets) -> List[Dict[str, str]]:
+    """Extract a list of source triplets in a readable format."""
+    sources = []
+    for edge in triplets:
+        try:
+            source_node = edge.get_source_node() if hasattr(edge, 'get_source_node') else None
+            target_node = edge.get_destination_node() if hasattr(edge, 'get_destination_node') else None
+        except Exception:
+            continue
+        
+        if source_node is None or target_node is None:
+            continue
+        
+        source_attrs = source_node.attributes if hasattr(source_node, 'attributes') else {}
+        target_attrs = target_node.attributes if hasattr(target_node, 'attributes') else {}
+        edge_attrs = edge.attributes if hasattr(edge, 'attributes') else {}
+        
+        sources.append({
+            "source": source_attrs.get('name', str(source_node.id)[:30] if hasattr(source_node, 'id') else 'Unknown'),
+            "relationship": edge_attrs.get('relationship_type', edge_attrs.get('relationship_name', 'related_to')),
+            "target": target_attrs.get('name', str(target_node.id)[:30] if hasattr(target_node, 'id') else 'Unknown'),
+        })
+    
+    return sources
+
+
+@app.post("/api/v1/chat/with-sources", response_model=ChatWithSourcesResponse)
+async def chat_with_sources(request: ChatRequest):
+    """
+    Query the knowledge graph and return the answer along with source references
+    and a link to visualize the relevant subgraph.
+    
+    This endpoint returns:
+    - **answer**: The response to the question
+    - **sources**: List of knowledge graph triplets used to generate the answer
+    - **graph_url**: URL to visualize the sources as an interactive graph
+    
+    - **query**: The question to ask
+    - **session_id**: Optional session ID for conversation history
+    """
+    try:
+        if not request.query or not request.query.strip():
+            raise HTTPException(status_code=400, detail="Query cannot be empty")
+        
+        # Get retriever
+        retriever = get_retriever()
+        
+        # Get completion WITH sources
+        result: CompletionResult = await retriever.get_completion_with_sources(
+            query=request.query.strip(),
+            session_id=request.session_id
+        )
+        
+        # Extract sources in readable format
+        sources = extract_sources_list(result.triplets)
+        
+        # Generate a unique filename for this query's graph
+        import hashlib
+        query_hash = hashlib.md5(request.query.encode()).hexdigest()[:8]
+        graph_filename = f"query_{query_hash}_sources.html"
+        graph_path = Path(__file__).parent.parent / "graphs" / graph_filename
+        
+        # Ensure graphs directory exists
+        graph_path.parent.mkdir(exist_ok=True)
+        
+        # Generate graph visualization using cognee's visualization
+        graph_data = triplets_to_graph_data(result.triplets)
+        html_content = await cognee_network_visualization(graph_data, str(graph_path))
+        
+        return ChatWithSourcesResponse(
+            answer=result.answer,
+            session_id=request.session_id,
+            sources=sources,
+            graph_url=f"/api/v1/graphs/{graph_filename}"
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during chat: {str(e)}")
+
+
+@app.get("/api/v1/graphs/{filename}", response_class=HTMLResponse)
+async def get_graph_visualization(filename: str):
+    """
+    Serve the generated graph visualization HTML file.
+    
+    - **filename**: Name of the graph file to serve
+    """
+    try:
+        graph_path = Path(__file__).parent.parent / "graphs" / filename
+        
+        if not graph_path.exists():
+            raise HTTPException(status_code=404, detail=f"Graph not found: {filename}")
+        
+        # Security check: ensure the file is within the graphs directory
+        if not graph_path.resolve().is_relative_to((Path(__file__).parent.parent / "graphs").resolve()):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        with open(graph_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        return HTMLResponse(content=html_content)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error serving graph: {str(e)}")
+
+
+@app.post("/api/v1/visualize-query")
+async def visualize_query(request: ChatRequest):
+    """
+    Generate a graph visualization for a query without getting the full answer.
+    Useful for exploring what information is available for a question.
+    
+    Returns the URL to the graph visualization and basic stats.
+    
+    - **query**: The question to visualize sources for
+    """
+    try:
+        if not request.query or not request.query.strip():
+            raise HTTPException(status_code=400, detail="Query cannot be empty")
+        
+        # Get retriever
+        retriever = get_retriever()
+        
+        # Get just the context (triplets) without generating the full answer
+        triplets = await retriever.get_context(request.query.strip())
+        
+        if not triplets:
+            return {
+                "message": "No relevant sources found for this query",
+                "nodes_count": 0,
+                "edges_count": 0,
+                "graph_url": None
+            }
+        
+        # Generate graph visualization
+        import hashlib
+        query_hash = hashlib.md5(request.query.encode()).hexdigest()[:8]
+        graph_filename = f"explore_{query_hash}.html"
+        graph_path = Path(__file__).parent.parent / "graphs" / graph_filename
+        graph_path.parent.mkdir(exist_ok=True)
+        
+        graph_data = triplets_to_graph_data(triplets)
+        nodes_data, edges_data = graph_data
+        
+        await cognee_network_visualization(graph_data, str(graph_path))
+        
+        # Extract sources summary
+        sources = extract_sources_list(triplets)
+        
+        return {
+            "message": "Graph visualization generated",
+            "query": request.query,
+            "nodes_count": len(nodes_data),
+            "edges_count": len(edges_data),
+            "sources": sources,
+            "graph_url": f"/api/v1/graphs/{graph_filename}"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error visualizing query: {str(e)}")
 
 
 if __name__ == "__main__":

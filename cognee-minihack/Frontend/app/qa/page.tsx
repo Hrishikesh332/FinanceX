@@ -3,8 +3,22 @@
 import { Sidebar } from "@/components/sidebar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Send, Sparkles, AlertCircle } from "lucide-react"
+import { SourcesViewer } from "@/components/sources-viewer"
+import { Send, Sparkles, AlertCircle, Network } from "lucide-react"
 import { useState } from "react"
+
+interface Source {
+  source: string
+  relationship: string
+  target: string
+}
+
+interface Message {
+  role: string
+  content: string
+  sources?: Source[]
+  graphUrl?: string
+}
 
 const sampleQuestions = [
   "How many invoices do we have in total?",
@@ -15,10 +29,11 @@ const sampleQuestions = [
 ]
 
 export default function QAPage() {
-  const [messages, setMessages] = useState<Array<{ role: string; content: string }>>([])
+  const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showSources, setShowSources] = useState(true)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -31,8 +46,8 @@ export default function QAPage() {
     setError(null)
 
     try {
-      // Call the real API
-      const response = await fetch('http://localhost:8000/api/v1/chat', {
+      // Call the API with sources
+      const response = await fetch('http://localhost:8000/api/v1/chat/with-sources', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -48,12 +63,14 @@ export default function QAPage() {
 
       const data = await response.json()
       
-      // Add the assistant's response
+      // Add the assistant's response with sources
       setMessages(prev => [
         ...prev,
         {
           role: "assistant",
-          content: data.answer || data.response || "I received your question but couldn't generate a response."
+          content: data.answer || data.response || "I received your question but couldn't generate a response.",
+          sources: data.sources || [],
+          graphUrl: data.graph_url
         }
       ])
     } catch (err) {
@@ -63,7 +80,7 @@ export default function QAPage() {
         ...prev,
         {
           role: "assistant",
-          content: "Sorry, I'm having trouble connecting to the knowledge graph. Please ensure:\n\n1. The API is running: `python app.py` in cognee-minihack/\n2. Ollama is running with the required models\n3. The knowledge graph has been set up\n\nError: " + (err instanceof Error ? err.message : 'Connection failed')
+          content: "Sorry, I'm having trouble connecting to the knowledge graph. Please ensure:\n\n1. The API is running: `python services/api.py` in cognee-minihack/\n2. Ollama is running with the required models\n3. The knowledge graph has been set up\n\nError: " + (err instanceof Error ? err.message : 'Connection failed')
         }
       ])
     } finally {
@@ -77,8 +94,21 @@ export default function QAPage() {
 
       <main className="flex-1 overflow-hidden flex flex-col">
         <div className="border-b border-border p-8">
-          <h1 className="text-3xl font-bold text-foreground">Finance Q&A</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Ask questions about your invoices and financial data using the knowledge graph</p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-foreground">Finance Q&A</h1>
+              <p className="mt-1 text-sm text-muted-foreground">Ask questions about your invoices and financial data using the knowledge graph</p>
+            </div>
+            <Button
+              variant={showSources ? "default" : "outline"}
+              size="sm"
+              onClick={() => setShowSources(!showSources)}
+              className="gap-2"
+            >
+              <Network className="h-4 w-4" />
+              {showSources ? "Sources On" : "Sources Off"}
+            </Button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-8">
@@ -110,7 +140,10 @@ export default function QAPage() {
 
               <div className="mt-8 p-4 rounded-lg bg-muted/50 border border-border">
                 <p className="text-xs text-muted-foreground text-center">
-                  💡 Connected to knowledge graph API at http://localhost:8000/api/v1/chat
+                  💡 Connected to knowledge graph API at http://localhost:8000/api/v1/chat/with-sources
+                </p>
+                <p className="text-xs text-muted-foreground text-center mt-1">
+                  🔗 Responses include source references from the knowledge graph
                 </p>
               </div>
             </div>
@@ -126,18 +159,28 @@ export default function QAPage() {
                       <Sparkles className="h-4 w-4 text-primary-foreground" />
                     </div>
                   )}
-                  <div
-                    className={`rounded-lg px-4 py-3 max-w-[80%] ${
-                      message.role === "user" ? "bg-primary text-primary-foreground" : "bg-card border border-border"
-                    }`}
-                  >
-                    <p
-                      className={`text-sm whitespace-pre-line ${
-                        message.role === "user" ? "text-primary-foreground" : "text-foreground"
+                  <div className={`max-w-[80%] ${message.role === "user" ? "" : ""}`}>
+                    <div
+                      className={`rounded-lg px-4 py-3 ${
+                        message.role === "user" ? "bg-primary text-primary-foreground" : "bg-card border border-border"
                       }`}
                     >
-                      {message.content}
-                    </p>
+                      <p
+                        className={`text-sm whitespace-pre-line ${
+                          message.role === "user" ? "text-primary-foreground" : "text-foreground"
+                        }`}
+                      >
+                        {message.content}
+                      </p>
+                    </div>
+                    
+                    {/* Show sources for assistant messages */}
+                    {message.role === "assistant" && showSources && message.sources && message.sources.length > 0 && (
+                      <SourcesViewer 
+                        sources={message.sources} 
+                        graphUrl={message.graphUrl}
+                      />
+                    )}
                   </div>
                   {message.role === "user" && (
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
