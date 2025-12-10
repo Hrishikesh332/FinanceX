@@ -4,7 +4,8 @@ import { Sidebar } from "@/components/sidebar"
 import { StatCard } from "@/components/stat-card"
 import { AgentWorkflow } from "@/components/agent-workflow"
 import { KnowledgeGraph } from "@/components/knowledge-graph"
-import { FileText, AlertCircle, CheckCircle2, Upload, CreditCard, Users } from "lucide-react"
+import { PDFUpload } from "@/components/pdf-upload"
+import { FileText, AlertCircle, CheckCircle2, CreditCard, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { useEffect, useState } from "react"
@@ -85,10 +86,10 @@ export default function DashboardPage() {
                 Monitor your autonomous invoice reconciliation system
               </p>
             </div>
-            <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
-              <Upload className="mr-2 h-4 w-4" />
-              Upload Invoice
-            </Button>
+            <PDFUpload onUploadComplete={() => {
+              // Optionally refresh data after upload
+              window.location.reload()
+            }} />
           </div>
 
           {/* Stats Grid */}

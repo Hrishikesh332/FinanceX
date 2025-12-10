@@ -53,6 +53,8 @@ os.environ["EMBEDDING_DIMENSIONS"] = "768"
 os.environ["HUGGINGFACE_TOKENIZER"] = "nomic-ai/nomic-embed-text-v1.5"
 
 import asyncio
+import tempfile
+import base64
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
@@ -60,6 +62,14 @@ from pydantic import BaseModel
 import pandas as pd
 import cognee
 from custom_retriever import GraphCompletionRetrieverWithUserPrompt
+
+# Import Mistral for OCR
+try:
+    from mistralai import Mistral
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    MISTRAL_AVAILABLE = False
+    Mistral = None
 
 app = FastAPI(
     title="FinanceX Cognee API",
@@ -161,6 +171,8 @@ async def root():
         "endpoints": {
             "ingest_text": "/api/v1/ingest/text",
             "ingest_csv": "/api/v1/ingest/csv",
+            "ingest_pdf": "/api/v1/ingest/pdf",
+            "ingest_image": "/api/v1/ingest/image",
             "chat": "/api/v1/chat",
             "health": "/health"
         }
@@ -283,6 +295,393 @@ async def ingest_csv(
         raise HTTPException(status_code=400, detail=f"Error parsing CSV: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during CSV ingestion: {str(e)}")
+
+
+@app.post("/api/v1/ingest/pdf", response_model=IngestionResponse)
+async def ingest_pdf(
+    file: UploadFile = File(...),
+    data_type: str = Form("invoice"),
+    custom_prompt: Optional[str] = Form(None)
+):
+    """
+    Ingest PDF file data into the knowledge graph using Mistral OCR.
+    
+    Flow:
+    1. Upload PDF to Mistral OCR API
+    2. Extract text from PDF using Mistral OCR
+    3. Process extracted text through cognee embeddings
+    
+    - **file**: PDF file to upload
+    - **data_type**: Type of data ("invoice" or "transaction") - determines which prompt to use
+    - **custom_prompt**: Optional custom prompt for processing (overrides data_type prompt)
+    
+    Requires MISTRAL_API_KEY environment variable to be set.
+    """
+    if not MISTRAL_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail="Mistral AI library not installed. Install with: pip install mistralai>=1.0.0"
+        )
+    
+    # Check for Mistral API key
+    mistral_api_key = os.environ.get("MISTRAL_API_KEY")
+    if not mistral_api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="MISTRAL_API_KEY environment variable not set. Please set it to use PDF OCR."
+        )
+    
+    try:
+        # Validate file type
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="File must be a PDF (.pdf)")
+        
+        # Validate data_type
+        if data_type.lower() not in ["invoice", "transaction"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid data_type: {data_type}. Must be 'invoice' or 'transaction'"
+            )
+        
+        # Read PDF file content
+        pdf_content = await file.read()
+        
+        if not pdf_content:
+            raise HTTPException(status_code=400, detail="PDF file is empty")
+        
+        # Initialize Mistral client
+        client = Mistral(api_key=mistral_api_key)
+        
+        # Upload PDF to Mistral OCR
+        # We need to save it temporarily since Mistral expects a file path or file-like object
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            tmp_file.write(pdf_content)
+            tmp_file_path = tmp_file.name
+        
+        try:
+            # Upload to Mistral OCR
+            uploaded_file = client.files.upload(
+                file={
+                    "file_name": file.filename or "document.pdf",
+                    "content": open(tmp_file_path, "rb"),
+                },
+                purpose="ocr"
+            )
+            
+            # Wait for OCR processing to complete
+            # Mistral OCR processes asynchronously, so we need to poll for completion
+            import time
+            max_wait_time = 60  # Maximum wait time in seconds
+            wait_interval = 2  # Check every 2 seconds
+            elapsed_time = 0
+            
+            while elapsed_time < max_wait_time:
+                file_status = client.files.retrieve(uploaded_file.id)
+                if hasattr(file_status, 'status') and file_status.status == 'processed':
+                    break
+                time.sleep(wait_interval)
+                elapsed_time += wait_interval
+            
+            # Retrieve the extracted text from Mistral
+            extracted_text = ""
+            file_info = None
+            
+            try:
+                # Get file info first (used in multiple methods)
+                file_info = client.files.retrieve(uploaded_file.id)
+                
+                # Method 1: Try to get file content directly
+                # Mistral API may provide content through files.content() or similar
+                if hasattr(client, 'files') and hasattr(client.files, 'content'):
+                    try:
+                        file_content = client.files.content(uploaded_file.id)
+                        if hasattr(file_content, 'text'):
+                            extracted_text = file_content.text
+                        elif hasattr(file_content, 'content'):
+                            extracted_text = file_content.content
+                        elif isinstance(file_content, (str, bytes)):
+                            extracted_text = file_content if isinstance(file_content, str) else file_content.decode('utf-8')
+                    except Exception:
+                        pass  # Method 1 failed, try next method
+                
+                # Method 2: Try retrieving text from file info
+                if not extracted_text and file_info:
+                    # Check various possible attributes
+                    for attr in ['text', 'content', 'extracted_text', 'ocr_text', 'data', 'result']:
+                        if hasattr(file_info, attr):
+                            value = getattr(file_info, attr)
+                            if value:
+                                extracted_text = value if isinstance(value, str) else str(value)
+                                break
+                
+                # Method 3: If file has a download URL or content URL, fetch it
+                if not extracted_text and file_info and hasattr(file_info, 'download_url'):
+                    try:
+                        import httpx
+                        async with httpx.AsyncClient() as http_client:
+                            response = await http_client.get(file_info.download_url)
+                            if response.status_code == 200:
+                                extracted_text = response.text
+                    except Exception:
+                        pass  # Method 3 failed
+                
+                if not extracted_text:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Could not retrieve extracted text from Mistral OCR. File ID: {uploaded_file.id}. Please check Mistral API response structure. File status: {getattr(file_info, 'status', 'unknown') if file_info else 'unknown'}"
+                    )
+                    
+            except HTTPException:
+                raise
+            except AttributeError as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Mistral API structure unexpected. Error: {str(e)}. Please verify Mistral API version and method names."
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error retrieving OCR text from Mistral: {str(e)}"
+                )
+            
+            if not extracted_text or not extracted_text.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="No text could be extracted from the PDF. The PDF might be empty or contain only images without OCR."
+                )
+            
+            # Determine which prompt to use
+            if custom_prompt:
+                prompt = custom_prompt
+            elif data_type.lower() == "invoice":
+                prompt = INVOICE_PROMPT
+            else:
+                prompt = TRANSACTION_PROMPT
+            
+            # Split extracted text into chunks (by paragraphs or pages)
+            # For large PDFs, we might want to split into multiple chunks
+            text_chunks = [chunk.strip() for chunk in extracted_text.split('\n\n') if chunk.strip()]
+            
+            if not text_chunks:
+                # Fallback: split by single newlines
+                text_chunks = [chunk.strip() for chunk in extracted_text.split('\n') if chunk.strip()]
+            
+            if not text_chunks:
+                raise HTTPException(status_code=400, detail="No processable text content found in PDF")
+            
+            # Add extracted text to cognee
+            await cognee.add(text_chunks)
+            
+            # Create embeddings and build graph
+            await cognee.cognify(custom_prompt=prompt)
+            
+            # Clean up: delete the uploaded file from Mistral
+            try:
+                client.files.delete(uploaded_file.id)
+            except:
+                pass  # Ignore cleanup errors
+            
+            return IngestionResponse(
+                message=f"Successfully ingested PDF '{file.filename}' ({len(text_chunks)} text chunks) as {data_type}",
+                items_processed=len(text_chunks),
+                data_type=data_type
+            )
+        
+        finally:
+            # Clean up temporary file
+            import os as os_module
+            try:
+                os_module.unlink(tmp_file_path)
+            except:
+                pass
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during PDF ingestion: {str(e)}")
+
+
+@app.post("/api/v1/ingest/image", response_model=IngestionResponse)
+async def ingest_image(
+    file: UploadFile = File(...),
+    data_type: str = Form("invoice"),
+    custom_prompt: Optional[str] = Form(None)
+):
+    """
+    Ingest image file data into the knowledge graph using Mistral OCR.
+    
+    Flow:
+    1. Encode image as base64
+    2. Send to Mistral OCR API for text extraction
+    3. Process extracted text through cognee embeddings
+    
+    - **file**: Image file to upload (jpg, png, etc.)
+    - **data_type**: Type of data ("invoice" or "transaction") - determines which prompt to use
+    - **custom_prompt**: Optional custom prompt for processing (overrides data_type prompt)
+    
+    Requires MISTRAL_API_KEY environment variable to be set.
+    """
+    if not MISTRAL_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail="Mistral AI library not installed. Install with: pip install mistralai>=1.0.0"
+        )
+    
+    # Check for Mistral API key
+    mistral_api_key = os.environ.get("MISTRAL_API_KEY")
+    if not mistral_api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="MISTRAL_API_KEY environment variable not set. Please set it to use image OCR."
+        )
+    
+    try:
+        # Validate file type
+        allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="File must have a filename")
+        
+        file_ext = '.' + file.filename.lower().split('.')[-1] if '.' in file.filename.lower() else ''
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File must be an image. Allowed formats: {', '.join(allowed_extensions)}"
+            )
+        
+        # Validate data_type
+        if data_type.lower() not in ["invoice", "transaction"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid data_type: {data_type}. Must be 'invoice' or 'transaction'"
+            )
+        
+        # Read image file content
+        image_content = await file.read()
+        
+        if not image_content:
+            raise HTTPException(status_code=400, detail="Image file is empty")
+        
+        # Encode image as base64
+        base64_image = base64.b64encode(image_content).decode('utf-8')
+        
+        # Determine image MIME type
+        mime_type_map = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.bmp': 'image/bmp',
+            '.webp': 'image/webp'
+        }
+        mime_type = mime_type_map.get(file_ext, 'image/jpeg')
+        
+        # Initialize Mistral client
+        client = Mistral(api_key=mistral_api_key)
+        
+        # Process image with Mistral OCR
+        try:
+            ocr_response = client.ocr.process(
+                model="mistral-ocr-latest",
+                document={
+                    "type": "image_url",
+                    "image_url": f"data:{mime_type};base64,{base64_image}"
+                },
+                include_image_base64=True
+            )
+            
+            # Extract text from OCR response
+            extracted_text = ""
+            
+            # Try different possible response structures
+            if hasattr(ocr_response, 'text'):
+                extracted_text = ocr_response.text
+            elif hasattr(ocr_response, 'content'):
+                content = ocr_response.content
+                if isinstance(content, str):
+                    extracted_text = content
+                elif isinstance(content, list):
+                    # If content is a list, try to extract text from each item
+                    text_parts = []
+                    for item in content:
+                        if isinstance(item, str):
+                            text_parts.append(item)
+                        elif hasattr(item, 'text'):
+                            text_parts.append(item.text)
+                        elif isinstance(item, dict) and 'text' in item:
+                            text_parts.append(item['text'])
+                    extracted_text = '\n'.join(text_parts)
+            elif hasattr(ocr_response, 'result'):
+                result = ocr_response.result
+                if isinstance(result, str):
+                    extracted_text = result
+                elif hasattr(result, 'text'):
+                    extracted_text = result.text
+            elif isinstance(ocr_response, str):
+                extracted_text = ocr_response
+            elif isinstance(ocr_response, dict):
+                # Try common keys
+                for key in ['text', 'content', 'result', 'extracted_text', 'ocr_text']:
+                    if key in ocr_response:
+                        value = ocr_response[key]
+                        if value:
+                            extracted_text = value if isinstance(value, str) else str(value)
+                            break
+            
+            if not extracted_text or not extracted_text.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="No text could be extracted from the image. The image might not contain readable text."
+                )
+            
+            # Determine which prompt to use
+            if custom_prompt:
+                prompt = custom_prompt
+            elif data_type.lower() == "invoice":
+                prompt = INVOICE_PROMPT
+            else:
+                prompt = TRANSACTION_PROMPT
+            
+            # Split extracted text into chunks (by lines or paragraphs)
+            text_chunks = [chunk.strip() for chunk in extracted_text.split('\n\n') if chunk.strip()]
+            
+            if not text_chunks:
+                # Fallback: split by single newlines
+                text_chunks = [chunk.strip() for chunk in extracted_text.split('\n') if chunk.strip()]
+            
+            if not text_chunks:
+                # Last resort: use the whole text as one chunk
+                text_chunks = [extracted_text.strip()]
+            
+            if not text_chunks:
+                raise HTTPException(status_code=400, detail="No processable text content found in image")
+            
+            # Add extracted text to cognee
+            await cognee.add(text_chunks)
+            
+            # Create embeddings and build graph
+            await cognee.cognify(custom_prompt=prompt)
+            
+            return IngestionResponse(
+                message=f"Successfully ingested image '{file.filename}' ({len(text_chunks)} text chunks) as {data_type}",
+                items_processed=len(text_chunks),
+                data_type=data_type
+            )
+        
+        except AttributeError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Mistral OCR API structure unexpected. Error: {str(e)}. Please verify Mistral API version and response format."
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing image with Mistral OCR: {str(e)}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during image ingestion: {str(e)}")
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)
